@@ -213,7 +213,7 @@ class TestDisplayResumedHistory:
         output = self._capture_display(cli)
 
         # Should show "earlier messages" indicator
-        assert "earlier messages" in output
+        assert "earlier messages hidden" in output
         # Last question should still be visible
         assert "Question #15" in output
 
@@ -240,6 +240,34 @@ class TestDisplayResumedHistory:
         output = self._capture_display(cli)
 
         assert output.strip() == ""
+
+    def test_full_mode_shows_summary_and_history_hint(self):
+        cli = _make_cli()
+        cli.conversation_history = _simple_history()
+        output = self._capture_display(cli)
+
+        assert "Summary:" in output
+        assert "Want the full transcript? Run" in output
+        assert "/history" in output
+
+    def test_tail_mode_hides_summary_and_history_hint(self):
+        cli = _make_cli(config_overrides={"display": {"resume_display": "tail"}})
+        cli.conversation_history = _simple_history()
+        output = self._capture_display(cli)
+
+        assert "Summary:" not in output
+        assert "Want the full transcript? Run" not in output
+
+    def test_compression_chain_note_shown_when_parent_session_exists(self):
+        cli = _make_cli()
+        cli.conversation_history = _simple_history()
+        cli._resumed_session_meta = {"parent_session_id": "older_session"}
+        output = self._capture_display(cli)
+
+        assert "continuation chain" in output
+        assert "older raw" in output
+        assert "history may live" in output
+        assert "linked session" in output
 
     def test_panel_has_title(self):
         cli = _make_cli()

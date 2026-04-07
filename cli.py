@@ -1232,7 +1232,9 @@ class HermesCLI:
         # YAML 1.1 parses bare `off` as boolean False — normalise to string.
         _raw_tp = CLI_CONFIG["display"].get("tool_progress", "all")
         self.tool_progress_mode = "off" if _raw_tp is False else str(_raw_tp)
-        # resume_display: "full" (show history) | "minimal" (one-liner only)
+        # resume_display: "full" (summary + recent tail) |
+        #                 "tail" (recent tail only) |
+        #                 "minimal" (one-liner only)
         self.resume_display = CLI_CONFIG["display"].get("resume_display", "full")
         # bell_on_complete: play terminal bell (\a) when agent finishes a response
         self.bell_on_complete = CLI_CONFIG["display"].get("bell_on_complete", False)
@@ -1391,6 +1393,7 @@ class HermesCLI:
         self.conversation_history: List[Dict[str, Any]] = []
         self.session_start = datetime.now()
         self._resumed = False
+        self._resumed_session_meta: Optional[Dict[str, Any]] = None
         # Initialize SQLite session store early so /title works before first message
         self._session_db = None
         try:
@@ -2279,6 +2282,7 @@ class HermesCLI:
             if restored:
                 restored = [m for m in restored if m.get("role") != "session_meta"]
                 self.conversation_history = restored
+                self._resumed_session_meta = session_meta
                 msg_count = len([m for m in restored if m.get("role") == "user"])
                 title_part = ""
                 if session_meta.get("title"):
@@ -2522,107 +2526,113 @@ class HermesCLI:
         return True
 
     def _display_resumed_history(self):
-        """Render a compact recap of previous conversation messages.
-
-        Uses Rich markup with dim/muted styling so the recap is visually
-        distinct from the active conversation.  Caps the display at the
-        last ``MAX_DISPLAY_EXCHANGES`` user/assistant exchanges and shows
-        an indicator for earlier hidden messages.
-        """
+        """Render a resume recap with a short summary and recent tail."""
         if not self.conversation_history:
             return
 
-        # Check config: resume_display setting
-        if self.resume_display == "minimal":
+        mode = str(self.resume_display or "full").strip().lower()
+        if mode == "minimal":
             return
+        if mode not in {"full", "tail"}:
+            mode = "full"
 
-        MAX_DISPLAY_EXCHANGES = 10   # max user+assistant pairs to show
-        MAX_USER_LEN = 300           # truncate user messages
-        MAX_ASST_LEN = 200           # truncate assistant text
-        MAX_ASST_LINES = 3           # max lines of assistant text
+        max_display_exchanges = 5 if mode == "full" else 10
+        max_user_len = 300
+        max_asst_len = 200
+        max_asst_lines = 3
 
         def _strip_reasoning(text: str) -> str:
-            """Remove <REASONING_SCRATCHPAD>...</REASONING_SCRATCHPAD> blocks
-            from displayed text (reasoning model internal thoughts)."""
+            """Remove displayed reasoning scratchpads from recap output."""
             import re
             cleaned = re.sub(
                 r"<REASONING_SCRATCHPAD>.*?</REASONING_SCRATCHPAD>\s*",
                 "", text, flags=re.DOTALL,
             )
-            # Also strip unclosed reasoning tags at the end
-            cleaned = re.sub(
-                r"<REASONING_SCRATCHPAD>.*$",
-                "", cleaned, flags=re.DOTALL,
-            )
+            cleaned = re.sub(r"<REASONING_SCRATCHPAD>.*$", "", cleaned, flags=re.DOTALL)
             return cleaned.strip()
 
-        # Collect displayable entries (skip system, tool-result messages)
-        entries = []  # list of (role, display_text)
+        def _extract_text(content: Any) -> str:
+            if content is None:
+                return ""
+            if isinstance(content, list):
+                parts = []
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        parts.append(part.get("text", ""))
+                    elif isinstance(part, dict) and part.get("type") == "image_url":
+                        parts.append("[image]")
+                return " ".join(parts).strip()
+            return str(content).strip()
+
+        def _truncate(text: str, *, max_len: int, max_lines: int | None = None) -> str:
+            text = text.strip()
+            if not text:
+                return ""
+            if max_lines is not None:
+                lines = text.splitlines()
+                if len(lines) > max_lines:
+                    text = "\n".join(lines[:max_lines]) + " ..."
+            if len(text) > max_len:
+                text = text[:max_len] + "..."
+            return text
+
+        entries = []
+        user_texts = []
+        assistant_texts = []
+        tool_call_count = 0
+
         for msg in self.conversation_history:
             role = msg.get("role", "")
             content = msg.get("content")
             tool_calls = msg.get("tool_calls") or []
 
-            if role == "system":
-                continue
-            if role == "tool":
+            if role in {"system", "tool"}:
                 continue
 
             if role == "user":
-                text = "" if content is None else str(content)
-                # Handle multimodal content (list of dicts)
-                if isinstance(content, list):
-                    parts = []
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            parts.append(part.get("text", ""))
-                        elif isinstance(part, dict) and part.get("type") == "image_url":
-                            parts.append("[image]")
-                    text = " ".join(parts)
-                if len(text) > MAX_USER_LEN:
-                    text = text[:MAX_USER_LEN] + "..."
+                raw_text = _extract_text(content)
+                if raw_text:
+                    user_texts.append(raw_text)
+                text = _truncate(raw_text, max_len=max_user_len)
                 entries.append(("user", text))
+                continue
 
-            elif role == "assistant":
-                text = "" if content is None else str(content)
-                text = _strip_reasoning(text)
-                parts = []
-                if text:
-                    lines = text.splitlines()
-                    if len(lines) > MAX_ASST_LINES:
-                        text = "\n".join(lines[:MAX_ASST_LINES]) + " ..."
-                    if len(text) > MAX_ASST_LEN:
-                        text = text[:MAX_ASST_LEN] + "..."
-                    parts.append(text)
-                if tool_calls:
-                    tc_count = len(tool_calls)
-                    # Extract tool names
-                    names = []
-                    for tc in tool_calls:
-                        fn = tc.get("function", {})
-                        name = fn.get("name", "unknown") if isinstance(fn, dict) else "unknown"
-                        if name not in names:
-                            names.append(name)
-                    names_str = ", ".join(names[:4])
-                    if len(names) > 4:
-                        names_str += ", ..."
-                    noun = "call" if tc_count == 1 else "calls"
-                    parts.append(f"[{tc_count} tool {noun}: {names_str}]")
-                if not parts:
-                    # Skip pure-reasoning messages that have no visible output
-                    continue
-                entries.append(("assistant", " ".join(parts)))
+            if role != "assistant":
+                continue
+
+            raw_text = _strip_reasoning(_extract_text(content))
+            if raw_text:
+                assistant_texts.append(raw_text)
+            parts = []
+            text = _truncate(raw_text, max_len=max_asst_len, max_lines=max_asst_lines)
+            if text:
+                parts.append(text)
+            if tool_calls:
+                tc_count = len(tool_calls)
+                tool_call_count += tc_count
+                names = []
+                for tc in tool_calls:
+                    fn = tc.get("function", {})
+                    name = fn.get("name", "unknown") if isinstance(fn, dict) else "unknown"
+                    if name not in names:
+                        names.append(name)
+                names_str = ", ".join(names[:4])
+                if len(names) > 4:
+                    names_str += ", ..."
+                noun = "call" if tc_count == 1 else "calls"
+                parts.append(f"[{tc_count} tool {noun}: {names_str}]")
+            if not parts:
+                continue
+            entries.append(("assistant", " ".join(parts)))
 
         if not entries:
             return
 
-        # Determine if we need to truncate
         skipped = 0
-        if len(entries) > MAX_DISPLAY_EXCHANGES * 2:
-            skipped = len(entries) - MAX_DISPLAY_EXCHANGES * 2
+        if len(entries) > max_display_exchanges * 2:
+            skipped = len(entries) - max_display_exchanges * 2
             entries = entries[skipped:]
 
-        # Build the display using Rich
         from rich.panel import Panel
         from rich.text import Text
 
@@ -2639,29 +2649,73 @@ class HermesCLI:
             _session_border_c = "#8B8682"
             _assistant_label_c = "#8FBC8F"
 
+        user_count = len(user_texts)
+        recent_user_topics = []
+        for text in reversed(user_texts):
+            compact = " ".join(text.split())
+            if compact and compact not in recent_user_topics:
+                recent_user_topics.append(compact)
+            if len(recent_user_topics) == 2:
+                break
+        recent_user_topics.reverse()
+        def _summary_topic(topic: str) -> str:
+            compact = " ".join(topic.split())
+            if len(compact) > 80 and " " not in compact:
+                return "[long message]"
+            return _truncate(compact, max_len=72)
+        recent_focus = "; then ".join(
+            f'“{_summary_topic(topic)}”' for topic in recent_user_topics
+        )
+        last_assistant = _truncate(
+            " ".join((assistant_texts[-1] if assistant_texts else "").split()),
+            max_len=96,
+        )
+        parent_session_id = (self._resumed_session_meta or {}).get("parent_session_id")
+
         lines = Text()
+        if mode == "full":
+            summary_bits = [f"{user_count} user message{'s' if user_count != 1 else ''} so far"]
+            if recent_focus:
+                summary_bits.append(f"recent focus: {recent_focus}")
+            if last_assistant:
+                summary_bits.append(f"last Hermes reply: “{last_assistant}”")
+            if tool_call_count:
+                summary_bits.append(f"{tool_call_count} tool call{'s' if tool_call_count != 1 else ''} in the visible transcript")
+
+            lines.append("  Summary: ", style=f"dim bold {_assistant_label_c}")
+            lines.append(". ".join(summary_bits) + ".\n\n", style="dim")
+            if parent_session_id:
+                lines.append(
+                    "  Note: This resumed session is part of a continuation chain; older raw history may live in an earlier linked session.\n\n",
+                    style="dim italic",
+                )
+
         if skipped:
             lines.append(
-                f"  ... {skipped} earlier messages ...\n\n",
+                f"  ... {skipped} earlier messages hidden ...\n\n",
                 style="dim italic",
             )
 
         for i, (role, text) in enumerate(entries):
             if role == "user":
                 lines.append("  ● You: ", style=f"dim bold {_session_label_c}")
-                # Show first line inline, indent rest
-                msg_lines = text.splitlines()
+                msg_lines = text.splitlines() or [""]
                 lines.append(msg_lines[0] + "\n", style="dim")
                 for ml in msg_lines[1:]:
                     lines.append(f"         {ml}\n", style="dim")
             else:
                 lines.append("  ◆ Hermes: ", style=f"dim bold {_assistant_label_c}")
-                msg_lines = text.splitlines()
+                msg_lines = text.splitlines() or [""]
                 lines.append(msg_lines[0] + "\n", style="dim")
                 for ml in msg_lines[1:]:
                     lines.append(f"            {ml}\n", style="dim")
             if i < len(entries) - 1:
-                lines.append("")  # small gap
+                lines.append("")
+
+        if mode == "full":
+            lines.append("\n  Want the full transcript? Run ", style="dim")
+            lines.append("/history", style=f"dim bold {_session_label_c}")
+            lines.append(".", style="dim")
 
         panel = Panel(
             lines,
@@ -3392,6 +3446,7 @@ class HermesCLI:
         restored = self._session_db.get_messages_as_conversation(target_id)
         restored = [m for m in (restored or []) if m.get("role") != "session_meta"]
         self.conversation_history = restored
+        self._resumed_session_meta = session_meta
 
         # Re-open the target session so it's not marked as ended
         try:
