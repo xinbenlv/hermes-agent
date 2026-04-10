@@ -211,6 +211,46 @@ class TestFastModeRouting(unittest.TestCase):
         # But request_overrides should be set
         assert route["request_overrides"] == {"service_tier": "priority"}
 
+    def test_turn_route_merges_runtime_request_overrides_with_fast_mode(self):
+        cli_mod = _import_cli()
+        stub = SimpleNamespace(
+            model="gpt-5.4",
+            api_key="primary-key",
+            base_url="https://openrouter.ai/api/v1",
+            provider="openrouter",
+            api_mode="chat_completions",
+            acp_command=None,
+            acp_args=[],
+            _credential_pool=None,
+            _smart_model_routing={},
+            _runtime_request_overrides={"extra_body": {"transforms": ["middle-out"]}},
+            service_tier="priority",
+        )
+
+        original_runtime = {
+            "api_key": "***",
+            "base_url": "https://openrouter.ai/api/v1",
+            "provider": "openrouter",
+            "api_mode": "chat_completions",
+            "command": None,
+            "args": [],
+            "credential_pool": None,
+            "request_overrides": {"extra_body": {"transforms": ["middle-out"]}},
+        }
+
+        with patch("agent.smart_model_routing.resolve_turn_route", return_value={
+            "model": "gpt-5.4",
+            "runtime": dict(original_runtime),
+            "label": None,
+            "signature": ("gpt-5.4", "openrouter", "https://openrouter.ai/api/v1", "chat_completions", None, ()),
+        }):
+            route = cli_mod.HermesCLI._resolve_turn_agent_config(stub, "hi")
+
+        assert route["request_overrides"] == {
+            "extra_body": {"transforms": ["middle-out"]},
+            "service_tier": "priority",
+        }
+
     def test_turn_route_keeps_primary_runtime_when_model_has_no_fast_backend(self):
         cli_mod = _import_cli()
         stub = SimpleNamespace(

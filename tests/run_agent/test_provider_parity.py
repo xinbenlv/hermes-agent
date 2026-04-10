@@ -244,6 +244,27 @@ class TestBuildApiKwargsChatCompletionsServiceTier:
         kwargs = agent._build_api_kwargs(messages)
         assert "service_tier" not in kwargs
 
+    def test_merges_extra_body_request_overrides_without_clobbering_hermes_fields(self, monkeypatch):
+        agent = _make_agent(monkeypatch, "openrouter")
+        agent.model = "anthropic/claude-sonnet-4-20250514"
+        agent.providers_allowed = ["anthropic"]
+        agent.request_overrides = {
+            "extra_body": {
+                "provider": {
+                    "ignore": ["deepinfra"],
+                    "only": ["google"],
+                },
+                "transforms": ["middle-out"],
+            }
+        }
+        kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+
+        extra = kwargs["extra_body"]
+        assert extra["provider"]["only"] == ["anthropic"]
+        assert extra["provider"]["ignore"] == ["deepinfra"]
+        assert extra["transforms"] == ["middle-out"]
+        assert extra["reasoning"]["effort"] == "medium"
+
 
 class TestBuildApiKwargsAIGateway:
     def test_uses_chat_completions_format(self, monkeypatch):

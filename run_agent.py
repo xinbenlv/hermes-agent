@@ -5440,6 +5440,43 @@ class AIAgent:
                     content[-1]["cache_control"] = {"type": "ephemeral"}
                 break
 
+    @staticmethod
+    def _deep_merge_request_dicts(base: dict, overlay: dict) -> dict:
+        """Recursively merge two request dicts, letting overlay win on conflicts."""
+        merged = copy.deepcopy(base)
+        for key, value in overlay.items():
+            if isinstance(merged.get(key), dict) and isinstance(value, dict):
+                merged[key] = AIAgent._deep_merge_request_dicts(merged[key], value)
+            else:
+                merged[key] = copy.deepcopy(value)
+        return merged
+
+    def _apply_request_overrides(self, api_kwargs: dict, *, allow_extra_body: bool) -> dict:
+        """Apply generic request overrides while merging nested request payloads safely."""
+        if not self.request_overrides:
+            return api_kwargs
+
+        merged_kwargs = dict(api_kwargs)
+        for key, value in self.request_overrides.items():
+            if key == "extra_body":
+                if not allow_extra_body or not isinstance(value, dict):
+                    continue
+                existing = merged_kwargs.get("extra_body")
+                if isinstance(existing, dict):
+                    merged_kwargs["extra_body"] = self._deep_merge_request_dicts(value, existing)
+                else:
+                    merged_kwargs["extra_body"] = copy.deepcopy(value)
+                continue
+            if key == "extra_headers" and isinstance(value, dict):
+                existing = merged_kwargs.get("extra_headers")
+                if isinstance(existing, dict):
+                    merged_kwargs["extra_headers"] = self._deep_merge_request_dicts(value, existing)
+                else:
+                    merged_kwargs["extra_headers"] = copy.deepcopy(value)
+                continue
+            merged_kwargs[key] = value
+        return merged_kwargs
+
     def _build_api_kwargs(self, api_messages: list) -> dict:
         """Build the keyword arguments dict for the active API mode."""
         if self.api_mode == "anthropic_messages":
@@ -5522,8 +5559,7 @@ class AIAgent:
             elif not is_github_responses:
                 kwargs["include"] = []
 
-            if self.request_overrides:
-                kwargs.update(self.request_overrides)
+            kwargs = self._apply_request_overrides(kwargs, allow_extra_body=False)
 
             if self.max_tokens is not None and not is_codex_backend:
                 kwargs["max_output_tokens"] = self.max_tokens
@@ -5697,9 +5733,9 @@ class AIAgent:
             api_kwargs["extra_headers"] = {"x-grok-conv-id": self.session_id}
 
         # Priority Processing / generic request overrides (e.g. service_tier).
-        # Applied last so overrides win over any defaults set above.
-        if self.request_overrides:
-            api_kwargs.update(self.request_overrides)
+        # ``extra_body`` / ``extra_headers`` are merged specially so configured
+        # advanced request payloads can coexist with Hermes-generated fields.
+        api_kwargs = self._apply_request_overrides(api_kwargs, allow_extra_body=True)
 
         return api_kwargs
 

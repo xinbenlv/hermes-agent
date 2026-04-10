@@ -2606,6 +2606,7 @@ class HermesCLI:
         self.acp_args = resolved_acp_args
         self._credential_pool = resolved_credential_pool
         self._provider_source = runtime.get("source")
+        self._runtime_request_overrides = runtime.get("request_overrides")
         self.api_key = api_key
         self.base_url = base_url
 
@@ -2638,19 +2639,23 @@ class HermesCLI:
                 "command": self.acp_command,
                 "args": list(self.acp_args or []),
                 "credential_pool": getattr(self, "_credential_pool", None),
+                "request_overrides": getattr(self, "_runtime_request_overrides", None),
             },
         )
 
+        merged_overrides = dict(route["runtime"].get("request_overrides") or {})
         service_tier = getattr(self, "service_tier", None)
         if not service_tier:
-            route["request_overrides"] = None
+            route["request_overrides"] = merged_overrides or None
             return route
 
         try:
             overrides = resolve_fast_mode_overrides(route.get("model"))
         except Exception:
             overrides = None
-        route["request_overrides"] = overrides
+        if overrides:
+            merged_overrides.update(overrides)
+        route["request_overrides"] = merged_overrides or None
         return route
 
     def _init_agent(self, *, model_override: str = None, runtime_override: dict = None, route_label: str = None, request_overrides: dict | None = None) -> bool:
@@ -2722,8 +2727,10 @@ class HermesCLI:
                 "command": self.acp_command,
                 "args": list(self.acp_args or []),
                 "credential_pool": getattr(self, "_credential_pool", None),
+                "request_overrides": getattr(self, "_runtime_request_overrides", None),
             }
             effective_model = model_override or self.model
+            effective_request_overrides = request_overrides if request_overrides is not None else runtime.get("request_overrides")
             self.agent = AIAgent(
                 model=effective_model,
                 api_key=runtime.get("api_key"),
@@ -2741,7 +2748,7 @@ class HermesCLI:
                 prefill_messages=self.prefill_messages or None,
                 reasoning_config=self.reasoning_config,
                 service_tier=self.service_tier,
-                request_overrides=request_overrides,
+                request_overrides=effective_request_overrides,
                 providers_allowed=self._providers_only,
                 providers_ignored=self._providers_ignore,
                 providers_order=self._providers_order,
