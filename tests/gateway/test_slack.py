@@ -473,6 +473,26 @@ class TestIncomingDocumentHandling:
         msg_event = adapter.handle_message.call_args[0][0]
         assert msg_event.message_type == MessageType.PHOTO
 
+    @pytest.mark.asyncio
+    async def test_image_missing_files_read_scope_skips_download(self, adapter):
+        """If Slack reports missing files:read, skip image download and continue gracefully."""
+        with patch.object(adapter, "_assert_slack_file_readable", new_callable=AsyncMock) as readable, \
+             patch.object(adapter, "_download_slack_file", new_callable=AsyncMock) as dl:
+            readable.side_effect = PermissionError("Slack bot lacks files:read for file F123")
+            event = self._make_event(files=[{
+                "id": "F123",
+                "mimetype": "image/jpeg",
+                "name": "photo.jpg",
+                "url_private_download": "https://files.slack.com/photo.jpg",
+                "size": 1024,
+            }])
+            await adapter._handle_slack_message(event)
+
+        dl.assert_not_called()
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.message_type == MessageType.TEXT
+        assert msg_event.media_urls == []
+
 
 # ---------------------------------------------------------------------------
 # TestMessageRouting

@@ -373,13 +373,48 @@ from gateway.config import Platform, PlatformConfig  # noqa: E402
 
 
 def _make_slack_adapter():
-    config = PlatformConfig(enabled=True, token="xoxb-fake-token")
+    config = PlatformConfig(enabled=True, token="***")
     adapter = SlackAdapter(config)
     adapter._app = MagicMock()
     adapter._app.client = AsyncMock()
     adapter._bot_user_id = "U_BOT"
     adapter._running = True
     return adapter
+
+
+# ---------------------------------------------------------------------------
+# SlackAdapter._assert_slack_file_readable
+# ---------------------------------------------------------------------------
+
+class TestSlackAssertSlackFileReadable:
+    def test_missing_scope_raises_permission_error(self):
+        adapter = _make_slack_adapter()
+
+        class FakeSlackError(Exception):
+            def __init__(self, response):
+                super().__init__("missing scope")
+                self.response = response
+
+        adapter._app.client.files_info = AsyncMock(side_effect=FakeSlackError({
+            "error": "missing_scope",
+            "needed": "files:read",
+            "provided": "channels:read,channels:history,groups:history,im:history,im:read,users:read,chat:write,app_mentions:read,im:write,files:write",
+        }))
+
+        async def run():
+            await adapter._assert_slack_file_readable({"id": "F123"})
+
+        with pytest.raises(PermissionError, match="files:read"):
+            asyncio.run(run())
+
+    def test_missing_file_id_is_noop(self):
+        adapter = _make_slack_adapter()
+
+        async def run():
+            await adapter._assert_slack_file_readable({"name": "photo.jpg"})
+
+        asyncio.run(run())
+        adapter._app.client.files_info.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

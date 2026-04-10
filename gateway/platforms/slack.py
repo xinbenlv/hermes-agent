@@ -68,6 +68,7 @@ def _validate_slack_download_payload(response: Any, data: bytes, *, kind: str) -
         raise ValueError(
             f"Slack returned HTML instead of {kind} payload"
             + (f" (content-type={normalized_ct})" if normalized_ct else "")
+            + "; this often means the bot lacks files:read or the Slack file URL is no longer directly accessible"
         )
 
 
@@ -138,6 +139,42 @@ class SlackAdapter(BasePlatformAdapter):
         # Cache for _fetch_thread_context results: cache_key → _ThreadContextCache
         self._thread_context_cache: Dict[str, _ThreadContextCache] = {}
         self._THREAD_CACHE_TTL = 60.0
+
+    def _get_team_client(self, team_id: str = "") -> Optional[Any]:
+        """Return the Slack WebClient for the given team, if available."""
+        if team_id and team_id in self._team_clients:
+            return self._team_clients[team_id]
+        if getattr(self, "_app", None) is not None:
+            return getattr(self._app, "client", None)
+        return None
+
+    async def _assert_slack_file_readable(self, file_obj: Dict[str, Any], team_id: str = "") -> None:
+        """Surface a clear error when the bot lacks file-read scope for a Slack file."""
+        file_id = str(file_obj.get("id", "") or "").strip()
+        if not file_id:
+            return
+
+        client = self._get_team_client(team_id)
+        if client is None or not hasattr(client, "files_info"):
+            return
+
+        try:
+            await client.files_info(file=file_id)
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            if response is None or not hasattr(response, "get"):
+                raise
+
+            error = response.get("error")
+            if error != "missing_scope":
+                raise
+
+            needed = str(response.get("needed", "") or "required Slack file scope")
+            provided = str(response.get("provided", "") or "").strip()
+            provided_suffix = f"; provided scopes: {provided}" if provided else ""
+            raise PermissionError(
+                f"Slack bot lacks {needed} for file {file_id}{provided_suffix}"
+            ) from exc
 
     async def connect(self) -> bool:
         """Connect to Slack via Socket Mode."""
@@ -1118,6 +1155,7 @@ class SlackAdapter(BasePlatformAdapter):
             url = f.get("url_private_download") or f.get("url_private", "")
             if mimetype.startswith("image/") and url:
                 try:
+                    await self._assert_slack_file_readable(f, team_id=team_id)
                     ext = "." + mimetype.split("/")[-1].split(";")[0]
                     if ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
                         ext = ".jpg"
@@ -1130,6 +1168,7 @@ class SlackAdapter(BasePlatformAdapter):
                     logger.warning("[Slack] Failed to cache image from %s: %s", url, e, exc_info=True)
             elif mimetype.startswith("audio/") and url:
                 try:
+                    await self._assert_slack_file_readable(f, team_id=team_id)
                     ext = "." + mimetype.split("/")[-1].split(";")[0]
                     if ext not in (".ogg", ".mp3", ".wav", ".webm", ".m4a"):
                         ext = ".ogg"
@@ -1142,6 +1181,7 @@ class SlackAdapter(BasePlatformAdapter):
             elif url:
                 # Try to handle as a document attachment
                 try:
+                    await self._assert_slack_file_readable(f, team_id=team_id)
                     original_filename = f.get("name", "")
                     ext = ""
                     if original_filename:
