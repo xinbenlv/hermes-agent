@@ -10,6 +10,12 @@ This repo uses a carried patch queue on top of upstream `origin/main`.
 - `patch-feat-pr*` — upstream-bound feature carries
 - `cpq-capstone-*` — top-of-stack branding and metadata carries
 
+Required queue order inside `cpq-body`:
+
+1. `patch-fix-test-pr*`
+2. `patch-fix-func-pr*`
+3. `patch-feat-pr*`
+
 ## Sources of truth
 
 - Policy and workflow overview: `docs/carried-patches.md`
@@ -19,6 +25,10 @@ This repo uses a carried patch queue on top of upstream `origin/main`.
 
 ## Queue invariants
 
+- `cpq-cornerstone-0`, `cpq-cornerstone-1`, `cpq-capstone-1`, and `cpq-capstone-2` are required structural patches in the active queue, each exactly once.
+- `cpq-cornerstone-0` must appear before `cpq-cornerstone-1`.
+- `cpq-capstone-1` must appear before `cpq-capstone-2`.
+- patch buckets are optional, but if present they must stay ordered as `patch-fix-test-pr*` -> `patch-fix-func-pr*` -> `patch-feat-pr*`.
 - `cpq-capstone-2` is the canonical metadata snapshot for the current queue.
 - `cpq-head` must point to `cpq-capstone-2`.
 - Any mutation anywhere in `cpq-base..cpq-head` invalidates the old `cpq-capstone-2`.
@@ -37,16 +47,36 @@ Every carried patch commit must have:
 
 - a stable patch-id subject line
 - a Markdown body shaped like a PR description
-- upstream PR URL and status when applicable
-- why-carried and drop-condition sections
+- machine-readable metadata declared in body frontmatter when possible: `upstream:` (`null` for local-only carries) and `files:`
+- `## Summary` and `## Drop condition` sections for the free-text part
 
 Recommended sections:
 
 - `## Why carried`
-- `## Upstream`
-- `## Summary`
-- `## Drop condition`
-- `## Files`
+
+Preferred shape:
+
+```md
+patch-feat-pr9999: short title
+
+---
+upstream: https://github.com/NousResearch/hermes-agent/pull/9999
+files:
+  - path/to/file.py
+---
+
+## Summary
+- What changed.
+
+## Drop condition
+- When to remove the carry.
+```
+
+Legacy compatibility note:
+
+- Older carried commits may still use a Markdown `## Upstream` section with a single `PR:` line.
+- Older carried commits may still use a Markdown `## Files` section.
+- `Status:` is no longer required.
 
 ## Upstream backlink rule
 
@@ -55,6 +85,12 @@ Every upstream-bound carried patch PR body must include a literal backlink line:
 ```md
 Carried patch: patch-feat-pr6456
 ```
+
+## Queue maintenance rule
+
+When updating to a newer upstream `origin/main`, treat the operation as: move to the new upstream baseline, reevaluate every carried patch from the prior queue, replay only the still-needed carries in bucket order, then rebuild `cpq-capstone-2` last. Do not mechanically replay the old `cpq-capstone-2`; it must be recomposed because the active carried commit hashes changed.
+
+Refreshing `refs/cpq/base` and `refs/cpq/head` is part of that final capstone rebuild/alignment flow, not a conceptually separate maintenance phase.
 
 ## Push gate
 
