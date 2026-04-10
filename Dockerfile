@@ -2,6 +2,8 @@ FROM debian:13.4
 
 # Disable Python stdout buffering to ensure logs are printed immediately
 ENV PYTHONUNBUFFERED=1
+ENV VIRTUAL_ENV=/opt/hermes/.venv
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # Install system dependencies in one layer, clear APT cache
 RUN apt-get update && \
@@ -16,7 +18,8 @@ WORKDIR /opt/hermes
 # Use uv instead of pip for the giant [all] extra set — pip now hits
 # resolution-too-deep on GitHub Actions' Debian 13 / Python 3.13 image.
 RUN pip install --no-cache-dir uv --break-system-packages && \
-    uv pip install --system -e ".[all]" && \
+    uv venv "$VIRTUAL_ENV" && \
+    uv pip install --python "$VIRTUAL_ENV/bin/python" -e ".[all]" && \
     npm install --prefer-offline --no-audit && \
     npx playwright install --with-deps chromium --only-shell && \
     cd /opt/hermes/scripts/whatsapp-bridge && \
