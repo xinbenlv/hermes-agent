@@ -30,7 +30,7 @@ from pathlib import Path
 try:
     from hermes_constants import display_hermes_home, get_hermes_home
 except ModuleNotFoundError:
-    HERMES_AGENT_ROOT = Path(__file__).resolve().parents[4]
+    HERMES_AGENT_ROOT = Path(__file__).resolve().parents[4] / "hermes-agent"
     if HERMES_AGENT_ROOT.exists():
         sys.path.insert(0, str(HERMES_AGENT_ROOT))
     from hermes_constants import display_hermes_home, get_hermes_home
@@ -49,21 +49,86 @@ SCOPES = [
     "https://www.googleapis.com/auth/documents.readonly",
 ]
 
+# Maps each (service, action) to the scopes it requires.
+# If ANY scope in the list is granted, the operation is allowed (OR logic for
+# alternatives like gmail.readonly vs gmail.modify which both permit reads).
+# Each entry is a list of scope-sets; the operation needs at least one scope
+# from each set (AND of ORs).
+_SCOPE_PREFIX = "https://www.googleapis.com/auth/"
+_OPERATION_SCOPES: dict[tuple[str, str], list[list[str]]] = {
+    # Gmail — read-only actions accept readonly OR modify (modify is a superset)
+    ("gmail", "search"):  [[f"{_SCOPE_PREFIX}gmail.readonly", f"{_SCOPE_PREFIX}gmail.modify"]],
+    ("gmail", "get"):     [[f"{_SCOPE_PREFIX}gmail.readonly", f"{_SCOPE_PREFIX}gmail.modify"]],
+    ("gmail", "labels"):  [[f"{_SCOPE_PREFIX}gmail.readonly", f"{_SCOPE_PREFIX}gmail.modify", f"{_SCOPE_PREFIX}gmail.labels"]],
+    ("gmail", "send"):    [[f"{_SCOPE_PREFIX}gmail.send", f"{_SCOPE_PREFIX}gmail.modify"]],
+    ("gmail", "reply"):   [[f"{_SCOPE_PREFIX}gmail.send", f"{_SCOPE_PREFIX}gmail.modify"]],
+    ("gmail", "modify"):  [[f"{_SCOPE_PREFIX}gmail.modify"]],
+    # Calendar
+    ("calendar", "list"):   [[f"{_SCOPE_PREFIX}calendar", f"{_SCOPE_PREFIX}calendar.readonly"]],
+    ("calendar", "create"): [[f"{_SCOPE_PREFIX}calendar"]],
+    ("calendar", "delete"): [[f"{_SCOPE_PREFIX}calendar"]],
+    # Drive
+    ("drive", "search"):    [[f"{_SCOPE_PREFIX}drive.readonly", f"{_SCOPE_PREFIX}drive"]],
+    # Contacts
+    ("contacts", "list"):   [[f"{_SCOPE_PREFIX}contacts.readonly", f"{_SCOPE_PREFIX}contacts"]],
+    # Sheets
+    ("sheets", "get"):      [[f"{_SCOPE_PREFIX}spreadsheets.readonly", f"{_SCOPE_PREFIX}spreadsheets"]],
+    ("sheets", "update"):   [[f"{_SCOPE_PREFIX}spreadsheets"]],
+    ("sheets", "append"):   [[f"{_SCOPE_PREFIX}spreadsheets"]],
+    # Docs
+    ("docs", "get"):        [[f"{_SCOPE_PREFIX}documents.readonly", f"{_SCOPE_PREFIX}documents"]],
+}
 
-def _missing_scopes() -> list[str]:
+
+def _granted_scopes() -> set[str]:
+    """Return the set of OAuth scopes currently granted in the stored token."""
     try:
         payload = json.loads(TOKEN_PATH.read_text())
     except Exception:
-        return []
+        return set()
     raw = payload.get("scopes") or payload.get("scope")
     if not raw:
-        return []
-    granted = {s.strip() for s in (raw.split() if isinstance(raw, str) else raw) if s.strip()}
-    return sorted(scope for scope in SCOPES if scope not in granted)
+        return set()
+    return {s.strip() for s in (raw.split() if isinstance(raw, str) else raw) if s.strip()}
 
 
-def get_credentials():
-    """Load and refresh credentials from token file."""
+def _check_operation_scopes(service: str, action: str) -> None:
+    """Check that the token has sufficient scopes for the requested operation.
+
+    Exits with a helpful message if scopes are missing, suggesting the user
+    re-run setup to grant the needed scopes.  Does nothing if the operation
+    is not in the map (fail-open for unknown operations, letting the API
+    itself reject if needed).
+    """
+    key = (service, action)
+    required = _OPERATION_SCOPES.get(key)
+    if required is None:
+        return  # unknown operation — let the API decide
+    granted = _granted_scopes()
+    for alternatives in required:
+        if not any(scope in granted for scope in alternatives):
+            print(
+                f"This operation ({service} {action}) requires one of the following scopes:",
+                file=sys.stderr,
+            )
+            for scope in alternatives:
+                print(f"  - {scope}", file=sys.stderr)
+            print(
+                f"\nYour token does not include any of them. "
+                f"Re-run setup.py from the active Hermes profile ({display_hermes_home()}) "
+                f"to grant the additional scope.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+
+def get_credentials(*, required_scopes: list[str] | None = None):
+    """Load and refresh credentials from token file.
+
+    If *required_scopes* is provided, only those scopes are checked.
+    Otherwise the token is loaded with whatever scopes it already has
+    (no blanket all-scopes gate).
+    """
     if not TOKEN_PATH.exists():
         print("Not authenticated. Run the setup script first:", file=sys.stderr)
         print(f"  python {Path(__file__).parent / 'setup.py'}", file=sys.stderr)
@@ -72,26 +137,16 @@ def get_credentials():
     from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
 
-    creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+    # Load with the granted scopes (not the full SCOPES list) so the
+    # credentials object doesn't think it's under-scoped and refuse to work.
+    granted = _granted_scopes()
+    load_scopes = list(granted) if granted else None
+    creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), load_scopes)
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
         TOKEN_PATH.write_text(creds.to_json())
     if not creds.valid:
         print("Token is invalid. Re-run setup.", file=sys.stderr)
-        sys.exit(1)
-
-    missing_scopes = _missing_scopes()
-    if missing_scopes:
-        print(
-            "Token is valid but missing Google Workspace scopes required by this skill.",
-            file=sys.stderr,
-        )
-        for scope in missing_scopes:
-            print(f"  - {scope}", file=sys.stderr)
-        print(
-            f"Re-run setup.py from the active Hermes profile ({display_hermes_home()}) to restore full access.",
-            file=sys.stderr,
-        )
         sys.exit(1)
     return creds
 
@@ -512,6 +567,8 @@ def main():
     p.set_defaults(func=docs_get)
 
     args = parser.parse_args()
+    # Per-operation scope check: only require scopes needed for THIS action.
+    _check_operation_scopes(args.service, args.action)
     args.func(args)
 
 
