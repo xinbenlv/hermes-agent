@@ -8,6 +8,21 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 source venv/bin/activate  # ALWAYS activate before running Python
 ```
 
+## Carried Patches (CPQ)
+
+Use a carried patches approach for local fixes that are not yet upstreamed.
+
+- Keep local deviations explicit and minimal.
+- Document carried patches in commits and PRs so they do not become invisible drift.
+- Prefer fixing the underlying source in-repo over adding one-off shell hacks around it.
+- When a skill or script needs a local compatibility fix, carry the patch in this fork until it is upstreamed or no longer needed.
+- Maintain CPQ policy in `docs/carried-patches.md` and the live queue ledger in `docs/carried-patch-ledger.yaml`.
+- `AGENTS.md` local workflow guidance belongs to `cpq-cornerstone-0` and must stay out of upstream PRs unless explicitly requested; code changes to Hermes source must be done in a git worktree first, never directly in `~/.hermes/hermes-agent/`, because the live checkout can break the running agent itself, but docs-only / Markdown-only changes may be made directly in `~/.hermes/hermes-agent/`.
+- Default stance: do as much as possible yourself. If the user must do something, give the shortest direct path — exact URL, exact clicks, a one-screen context briefing, and concrete risk.
+- Read `skills/github/hermes-carried-patch-workflow/SKILL.md` before creating local carries, rebasing local `main`, or preparing upstream PRs that touch carried work.
+- Before choosing any CPQ/carried-patch commit naming, look up `skills/github/hermes-carried-patch-workflow/SKILL.md` instead of guessing from memory.
+- Keep `AGENTS.md` short; keep the full carried-patch workflow in `skills/github/hermes-carried-patch-workflow/SKILL.md`, the CPQ policy in `docs/carried-patches.md`, the live ledger in `docs/carried-patch-ledger.yaml`, and detailed patch rationale in commit message bodies.
+
 ## Project Structure
 
 ```
