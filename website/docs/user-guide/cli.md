@@ -220,7 +220,7 @@ The `display.busy_input_mode` config key controls what happens when you press En
 | Mode | Behavior |
 |------|----------|
 | `"interrupt"` (default) | Your message interrupts the current operation and is processed immediately |
-| `"queue"` | Your message is silently queued and sent as the next turn after the agent finishes |
+| `"queue"` | Enter becomes composition-first while busy: regular Enter inserts a newline, and pressing Enter on a blank trailing line queues the drafted message for the next turn |
 
 ```yaml
 # ~/.hermes/config.yaml

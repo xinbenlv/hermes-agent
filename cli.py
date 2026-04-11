@@ -1521,7 +1521,7 @@ class HermesCLI:
         self.bell_on_complete = CLI_CONFIG["display"].get("bell_on_complete", False)
         # show_reasoning: display model thinking/reasoning before the response
         self.show_reasoning = CLI_CONFIG["display"].get("show_reasoning", False)
-        # busy_input_mode: "interrupt" (Enter interrupts current run) or "queue" (Enter queues for next turn)
+        # busy_input_mode: "interrupt" (Enter interrupts current run) or "queue" (busy Enter keeps composing until a blank trailing line submits)
         _bim = CLI_CONFIG["display"].get("busy_input_mode", "interrupt")
         self.busy_input_mode = "queue" if str(_bim).strip().lower() == "queue" else "interrupt"
 
@@ -7585,6 +7585,29 @@ class HermesCLI:
             completions_menu,
         ]
 
+    def _resolve_busy_enter_action(self, raw_text: str) -> str:
+        """Decide what Enter should do while the agent is already running.
+
+        Returns one of:
+        - ``"interrupt"``: submit immediately through the interrupt queue
+        - ``"queue"``: enqueue as the next turn
+        - ``"compose"``: insert a newline and keep editing the draft
+        """
+        text = raw_text or ""
+        stripped = text.strip()
+
+        if self.busy_input_mode != "queue":
+            return "interrupt"
+        if stripped and _looks_like_slash_command(stripped):
+            return "queue"
+        if not stripped:
+            return "compose"
+
+        lines = text.split("\n")
+        if len(lines) >= 2 and lines[-1].strip() == "" and any(line.strip() for line in lines[:-1]):
+            return "queue"
+        return "compose"
+
     def run(self):
         """Run the interactive CLI loop with persistent input at bottom."""
         # Push the entire TUI to the bottom of the terminal so the banner,
@@ -7770,17 +7793,24 @@ class HermesCLI:
                 return
 
             # --- Normal input routing ---
-            text = event.app.current_buffer.text.strip()
+            raw_text = event.app.current_buffer.text
+            text = raw_text.strip()
             has_images = bool(self._attached_images)
+            if self._agent_running and not has_images:
+                busy_action = self._resolve_busy_enter_action(raw_text)
+                if busy_action == "compose":
+                    event.current_buffer.insert_text('\n')
+                    return
             if text or has_images:
-                # Snapshot and clear attached images
+                # Snapshot and clear attached images only once we're actually submitting.
                 images = list(self._attached_images)
                 self._attached_images.clear()
                 event.app.invalidate()
                 # Bundle text + images as a tuple when images are present
                 payload = (text, images) if images else text
                 if self._agent_running and not (text and _looks_like_slash_command(text)):
-                    if self.busy_input_mode == "queue":
+                    busy_action = self._resolve_busy_enter_action(raw_text)
+                    if busy_action == "queue":
                         # Queue for the next turn instead of interrupting
                         self._pending_input.put(payload)
                         preview = text if text else f"[{len(images)} image{'s' if len(images) != 1 else ''} attached]"

@@ -123,30 +123,35 @@ class TestBusyInputMode:
         cli.process_command("/queue follow up")
         assert cli._pending_input.get_nowait() == "follow up"
 
-    def test_queue_mode_routes_busy_enter_to_pending(self):
-        """In queue mode, Enter while busy should go to _pending_input, not _interrupt_queue."""
+    def test_queue_mode_busy_enter_without_blank_line_keeps_composing(self):
         cli = _make_cli(config_overrides={"display": {"busy_input_mode": "queue"}})
-        cli._agent_running = True
-        # Simulate what handle_enter does for non-command input while busy
-        text = "follow up"
-        if cli.busy_input_mode == "queue":
-            cli._pending_input.put(text)
-        else:
-            cli._interrupt_queue.put(text)
-        assert cli._pending_input.get_nowait() == "follow up"
-        assert cli._interrupt_queue.empty()
+        action = cli._resolve_busy_enter_action("follow up")
+        assert action == "compose"
+
+    def test_queue_mode_busy_enter_on_single_blank_trailing_line_queues(self):
+        cli = _make_cli(config_overrides={"display": {"busy_input_mode": "queue"}})
+        action = cli._resolve_busy_enter_action("follow up\n")
+        assert action == "queue"
+
+    def test_queue_mode_busy_enter_on_blank_trailing_line_queues(self):
+        cli = _make_cli(config_overrides={"display": {"busy_input_mode": "queue"}})
+        action = cli._resolve_busy_enter_action("follow up\n\n")
+        assert action == "queue"
+
+    def test_queue_mode_busy_enter_on_blank_trailing_line_with_spaces_queues(self):
+        cli = _make_cli(config_overrides={"display": {"busy_input_mode": "queue"}})
+        action = cli._resolve_busy_enter_action("follow up\n   \n")
+        assert action == "queue"
+
+    def test_queue_mode_busy_enter_slash_command_still_queues_immediately(self):
+        cli = _make_cli(config_overrides={"display": {"busy_input_mode": "queue"}})
+        action = cli._resolve_busy_enter_action("/queue follow up")
+        assert action == "queue"
 
     def test_interrupt_mode_routes_busy_enter_to_interrupt(self):
-        """In interrupt mode (default), Enter while busy goes to _interrupt_queue."""
         cli = _make_cli()
-        cli._agent_running = True
-        text = "redirect"
-        if cli.busy_input_mode == "queue":
-            cli._pending_input.put(text)
-        else:
-            cli._interrupt_queue.put(text)
-        assert cli._interrupt_queue.get_nowait() == "redirect"
-        assert cli._pending_input.empty()
+        action = cli._resolve_busy_enter_action("redirect")
+        assert action == "interrupt"
 
 
 class TestSingleQueryState:
