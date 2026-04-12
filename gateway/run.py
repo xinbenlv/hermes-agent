@@ -77,6 +77,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # Resolve Hermes home directory (respects HERMES_HOME override)
 from hermes_constants import get_hermes_home
 from utils import atomic_yaml_write, is_truthy_value
+from agent.usage_pricing import format_duration_compact, format_token_count_compact
 _hermes_home = get_hermes_home()
 
 # Load environment variables from ~/.hermes/.env first.
@@ -3762,6 +3763,21 @@ class GatewayRunner:
             if self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent):
                 await self._send_voice_reply(event, response)
 
+            try:
+                _metrics_enabled = bool(
+                    _load_gateway_config()
+                    .get("display", {})
+                    .get("response_metrics", False)
+                )
+            except Exception:
+                _metrics_enabled = False
+            metrics_summary = self._format_response_metrics_summary(
+                source=source,
+                agent_result=agent_result,
+                elapsed_seconds=_response_time,
+                enabled=_metrics_enabled,
+            )
+
             # If streaming already delivered the response, extract and
             # deliver any MEDIA: files before returning None.  Streaming
             # sends raw text chunks that include MEDIA: tags — the normal
@@ -3780,7 +3796,16 @@ class GatewayRunner:
                         await self._deliver_media_from_response(
                             response, event, _media_adapter,
                         )
+                        if metrics_summary:
+                            await self._send_response_metrics_followup(
+                                adapter=_media_adapter,
+                                source=source,
+                                metrics_summary=metrics_summary,
+                            )
                 return None
+
+            if response and metrics_summary:
+                response = f"{response}\n\n{metrics_summary}"
 
             return response
             
@@ -5097,8 +5122,57 @@ class GatewayRunner:
             for p in {audio_path, actual_path} - {None}:
                 try:
                     os.unlink(p)
-                except OSError:
+                except Exception:
                     pass
+
+    @staticmethod
+    def _response_metrics_supported_platform(platform: Optional[Platform]) -> bool:
+        return platform in {Platform.SLACK, Platform.TELEGRAM, Platform.DISCORD}
+
+    def _format_response_metrics_summary(
+        self,
+        source: SessionSource,
+        agent_result: Dict[str, Any],
+        elapsed_seconds: float,
+        enabled: bool = False,
+    ) -> Optional[str]:
+        if not enabled:
+            return None
+        if not self._response_metrics_supported_platform(getattr(source, "platform", None)):
+            return None
+
+        response = (agent_result.get("final_response") or "").strip()
+        if not response:
+            return None
+
+        elapsed_label = format_duration_compact(max(0, elapsed_seconds))
+        input_tokens = max(0, int(agent_result.get("input_tokens") or 0))
+        output_tokens = max(0, int(agent_result.get("output_tokens") or 0))
+        total_tokens = input_tokens + output_tokens
+        token_label = format_token_count_compact(total_tokens)
+
+        model_name = str(agent_result.get("model") or "").strip()
+        model_short = model_name.split("/")[-1] if "/" in model_name else model_name
+        if model_short.endswith(".gguf"):
+            model_short = model_short[:-5]
+        if len(model_short) > 26:
+            model_short = f"{model_short[:23]}..."
+
+        parts = [elapsed_label, f"{token_label} tok"]
+        if model_short:
+            parts.append(model_short)
+        return "— " + " · ".join(parts)
+
+    async def _send_response_metrics_followup(
+        self,
+        adapter: BasePlatformAdapter,
+        source: SessionSource,
+        metrics_summary: str,
+    ) -> None:
+        if not metrics_summary:
+            return
+        metadata = {"thread_id": source.thread_id} if source.thread_id else None
+        await adapter.send(source.chat_id, metrics_summary, metadata=metadata)
 
     async def _deliver_media_from_response(
         self,

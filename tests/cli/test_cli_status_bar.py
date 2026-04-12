@@ -71,6 +71,8 @@ class TestCLIStatusBar:
             context_tokens=12_450,
             context_length=200_000,
         )
+        cli_obj._last_user_message_at = datetime.now() - timedelta(seconds=18)
+        cli_obj._last_user_turn_token_baseline = 50
 
         text = cli_obj._build_status_bar_text(width=120)
 
@@ -78,6 +80,8 @@ class TestCLIStatusBar:
         assert "12.4K/200K" in text
         assert "6%" in text
         assert "$0.06" not in text  # cost hidden by default
+        assert "Δt 18s" in text
+        assert "Δtok 12.4K" in text
         assert "15m" in text
 
     def test_input_height_counts_wide_characters_using_cell_width(self):
@@ -190,13 +194,17 @@ class TestCLIStatusBar:
             context_tokens=12400,
             context_length=200_000,
         )
+        cli_obj._last_user_message_at = datetime.now() - timedelta(seconds=18)
+        cli_obj._last_user_turn_token_baseline = 0
 
         text = cli_obj._build_status_bar_text(width=60)
 
         assert "⚕" in text
         assert "$0.06" not in text  # cost hidden by default
+        assert "Δt 18s" in text
         assert "15m" in text
         assert "200K" not in text
+        assert "Δtok" not in text
 
     def test_build_status_bar_text_handles_missing_agent(self):
         cli_obj = _make_cli()
@@ -205,6 +213,83 @@ class TestCLIStatusBar:
 
         assert "⚕" in text
         assert "claude-sonnet-4-20250514" in text
+
+    def test_status_bar_snapshot_includes_last_user_elapsed_and_turn_tokens(self):
+        cli_obj = _attach_agent(
+            _make_cli(),
+            prompt_tokens=10_230,
+            completion_tokens=2_220,
+            total_tokens=12_450,
+            api_calls=7,
+            context_tokens=12_450,
+            context_length=200_000,
+        )
+        cli_obj._last_user_message_at = datetime.now() - timedelta(seconds=18)
+        cli_obj._last_user_turn_token_baseline = 50
+
+        snapshot = cli_obj._get_status_bar_snapshot()
+
+        assert snapshot["last_user_message_elapsed_seconds"] == 18
+        assert snapshot["last_user_message_elapsed_label"] == "18s"
+        assert snapshot["last_user_turn_tokens"] == 12_400
+        assert snapshot["last_user_turn_tokens_label"] == "12.4K"
+
+    def test_status_bar_snapshot_handles_missing_last_user_message(self):
+        cli_obj = _attach_agent(
+            _make_cli(),
+            prompt_tokens=10_230,
+            completion_tokens=2_220,
+            total_tokens=12_450,
+            api_calls=7,
+            context_tokens=12_450,
+            context_length=200_000,
+        )
+        cli_obj._last_user_message_at = None
+        cli_obj._last_user_turn_token_baseline = 50
+
+        snapshot = cli_obj._get_status_bar_snapshot()
+
+        assert snapshot["last_user_message_elapsed_seconds"] is None
+        assert snapshot["last_user_message_elapsed_label"] is None
+        assert snapshot["last_user_turn_tokens"] is None
+        assert snapshot["last_user_turn_tokens_label"] is None
+
+    def test_build_scrollback_status_snapshot_returns_previous_metrics(self):
+        cli_obj = _attach_agent(
+            _make_cli(),
+            prompt_tokens=10_230,
+            completion_tokens=2_220,
+            total_tokens=12_450,
+            api_calls=7,
+            context_tokens=12_450,
+            context_length=200_000,
+        )
+        cli_obj._last_user_message_at = datetime.now() - timedelta(seconds=18)
+        cli_obj._last_user_turn_token_baseline = 50
+
+        text = cli_obj._build_scrollback_status_snapshot(width=140)
+
+        assert text is not None
+        assert "⚕" in text
+        assert "Δt 18s" in text
+        assert "Δtok 12.4K" in text
+        assert "15m" in text
+
+    def test_build_scrollback_status_snapshot_skips_without_previous_turn(self):
+        cli_obj = _attach_agent(
+            _make_cli(),
+            prompt_tokens=10_230,
+            completion_tokens=2_220,
+            total_tokens=12_450,
+            api_calls=7,
+            context_tokens=12_450,
+            context_length=200_000,
+        )
+        cli_obj._last_user_message_at = None
+
+        text = cli_obj._build_scrollback_status_snapshot(width=140)
+
+        assert text is None
 
     def test_minimal_tui_chrome_threshold(self):
         cli_obj = _make_cli()

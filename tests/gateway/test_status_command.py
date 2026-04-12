@@ -140,6 +140,10 @@ async def test_handle_message_persists_agent_token_counts(monkeypatch):
 
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
     monkeypatch.setattr(
+        gateway_run, "_load_gateway_config",
+        lambda: {"display": {"response_metrics": True}},
+    )
+    monkeypatch.setattr(
         "agent.model_metadata.get_model_context_length",
         lambda *_args, **_kwargs: 100000,
     )

@@ -1822,6 +1822,8 @@ class HermesCLI:
         self._secret_deadline = 0
         self._spinner_text: str = ""  # thinking spinner text for TUI
         self._tool_start_time: float = 0.0  # monotonic timestamp when current tool started (for live elapsed)
+        self._last_user_message_at: Optional[datetime] = None
+        self._last_user_turn_token_baseline: int = 0
         self._pending_tool_info: dict = {}  # function_name -> list of (preview, args) for stacked scrollback
         self._last_scrollback_tool: str = ""  # last tool name printed to scrollback (for "new" dedup)
         self._command_running = False
@@ -1886,7 +1888,8 @@ class HermesCLI:
         if len(model_short) > 26:
             model_short = f"{model_short[:23]}..."
 
-        elapsed_seconds = max(0.0, (datetime.now() - self.session_start).total_seconds())
+        now = datetime.now()
+        elapsed_seconds = max(0.0, (now - self.session_start).total_seconds())
         snapshot = {
             "model_name": model_name,
             "model_short": model_short,
@@ -1903,6 +1906,10 @@ class HermesCLI:
             "session_total_tokens": 0,
             "session_api_calls": 0,
             "compressions": 0,
+            "last_user_message_elapsed_seconds": None,
+            "last_user_message_elapsed_label": None,
+            "last_user_turn_tokens": None,
+            "last_user_turn_tokens_label": None,
         }
 
         if not agent:
@@ -1916,6 +1923,16 @@ class HermesCLI:
         snapshot["session_completion_tokens"] = getattr(agent, "session_completion_tokens", 0) or 0
         snapshot["session_total_tokens"] = getattr(agent, "session_total_tokens", 0) or 0
         snapshot["session_api_calls"] = getattr(agent, "session_api_calls", 0) or 0
+
+        last_user_message_at = getattr(self, "_last_user_message_at", None)
+        if last_user_message_at is not None:
+            last_user_elapsed_seconds = max(0, int((now - last_user_message_at).total_seconds()))
+            snapshot["last_user_message_elapsed_seconds"] = last_user_elapsed_seconds
+            snapshot["last_user_message_elapsed_label"] = format_duration_compact(last_user_elapsed_seconds)
+            turn_token_baseline = max(0, int(getattr(self, "_last_user_turn_token_baseline", 0) or 0))
+            turn_tokens = max(0, snapshot["session_total_tokens"] - turn_token_baseline)
+            snapshot["last_user_turn_tokens"] = turn_tokens
+            snapshot["last_user_turn_tokens_label"] = format_token_count_compact(turn_tokens)
 
         compressor = getattr(agent, "context_compressor", None)
         if compressor:
@@ -2038,14 +2055,16 @@ class HermesCLI:
                 width = self._get_tui_terminal_width()
             percent = snapshot["context_percent"]
             percent_label = f"{percent}%" if percent is not None else "--"
+            elapsed_label = snapshot["last_user_message_elapsed_label"] or snapshot["duration"]
+            elapsed_label = f"Δt {elapsed_label}"
+            turn_tokens_label = snapshot["last_user_turn_tokens_label"]
             duration_label = snapshot["duration"]
 
             if width < 52:
-                text = f"⚕ {snapshot['model_short']} · {duration_label}"
+                text = f"⚕ {snapshot['model_short']} · {elapsed_label} · {duration_label}"
                 return self._trim_status_bar_text(text, width)
             if width < 76:
-                parts = [f"⚕ {snapshot['model_short']}", percent_label]
-                parts.append(duration_label)
+                parts = [f"⚕ {snapshot['model_short']}", percent_label, elapsed_label, duration_label]
                 return self._trim_status_bar_text(" · ".join(parts), width)
 
             if snapshot["context_length"]:
@@ -2055,11 +2074,19 @@ class HermesCLI:
             else:
                 context_label = "ctx --"
 
-            parts = [f"⚕ {snapshot['model_short']}", context_label, percent_label]
+            parts = [f"⚕ {snapshot['model_short']}", context_label, percent_label, elapsed_label]
+            if width >= 100 and turn_tokens_label:
+                parts.append(f"Δtok {turn_tokens_label}")
             parts.append(duration_label)
             return self._trim_status_bar_text(" │ ".join(parts), width)
         except Exception:
             return f"⚕ {self.model if getattr(self, 'model', None) else 'Hermes'}"
+
+    def _build_scrollback_status_snapshot(self, width: Optional[int] = None) -> Optional[str]:
+        """Return the previous turn's status metrics for scrollback persistence."""
+        if getattr(self, "_last_user_message_at", None) is None:
+            return None
+        return self._build_status_bar_text(width=width)
 
     def _get_status_bar_fragments(self):
         if not self._status_bar_visible or getattr(self, '_model_picker_state', None):
@@ -2072,12 +2099,17 @@ class HermesCLI:
             # actually renders, causing the fragments to overflow to a second
             # line and produce duplicated status bar rows over long sessions.
             width = self._get_tui_terminal_width()
+            elapsed_label = snapshot["last_user_message_elapsed_label"] or snapshot["duration"]
+            elapsed_label = f"Δt {elapsed_label}"
+            turn_tokens_label = snapshot["last_user_turn_tokens_label"]
             duration_label = snapshot["duration"]
 
             if width < 52:
                 frags = [
                     ("class:status-bar", " ⚕ "),
                     ("class:status-bar-strong", snapshot["model_short"]),
+                    ("class:status-bar-dim", " · "),
+                    ("class:status-bar-dim", elapsed_label),
                     ("class:status-bar-dim", " · "),
                     ("class:status-bar-dim", duration_label),
                     ("class:status-bar", " "),
@@ -2091,6 +2123,8 @@ class HermesCLI:
                         ("class:status-bar-strong", snapshot["model_short"]),
                         ("class:status-bar-dim", " · "),
                         (self._status_bar_context_style(percent), percent_label),
+                        ("class:status-bar-dim", " · "),
+                        ("class:status-bar-dim", elapsed_label),
                         ("class:status-bar-dim", " · "),
                         ("class:status-bar-dim", duration_label),
                         ("class:status-bar", " "),
@@ -2114,9 +2148,18 @@ class HermesCLI:
                         ("class:status-bar-dim", " "),
                         (bar_style, percent_label),
                         ("class:status-bar-dim", " │ "),
+                        ("class:status-bar-dim", elapsed_label),
+                    ]
+                    if width >= 100 and turn_tokens_label:
+                        frags.extend([
+                            ("class:status-bar-dim", " │ "),
+                            ("class:status-bar-dim", f"Δtok {turn_tokens_label}"),
+                        ])
+                    frags.extend([
+                        ("class:status-bar-dim", " │ "),
                         ("class:status-bar-dim", duration_label),
                         ("class:status-bar", " "),
-                    ]
+                    ])
 
             total_width = sum(self._status_bar_display_width(text) for _, text in frags)
             if total_width > width:
@@ -9451,6 +9494,9 @@ class HermesCLI:
                     import re as _re
                     _paste_ref_re = _re.compile(r'\[Pasted text #\d+: \d+ lines \u2192 (.+?)\]')
                     paste_refs = list(_paste_ref_re.finditer(user_input)) if isinstance(user_input, str) else []
+                    previous_status_snapshot = self._build_scrollback_status_snapshot()
+                    if previous_status_snapshot:
+                        ChatConsole().print(f"[dim]{_escape(previous_status_snapshot)}[/]")
                     if paste_refs:
                         def _expand_ref(m):
                             p = Path(m.group(1))
@@ -9499,6 +9545,10 @@ class HermesCLI:
 
                     # Regular chat - run agent
                     self._agent_running = True
+                    self._last_user_message_at = datetime.now()
+                    self._last_user_turn_token_baseline = int(
+                        getattr(self.agent, "session_total_tokens", 0) if self.agent else 0
+                    )
                     app.invalidate()  # Refresh status line
 
                     try:
