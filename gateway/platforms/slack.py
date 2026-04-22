@@ -15,7 +15,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Any, Tuple
+from typing import Dict, Optional, Any, Tuple, List
 
 try:
     from slack_bolt.async_app import AsyncApp
@@ -113,6 +113,91 @@ class SlackAdapter(BasePlatformAdapter):
         # Cache for _fetch_thread_context results: cache_key → _ThreadContextCache
         self._thread_context_cache: Dict[str, _ThreadContextCache] = {}
         self._THREAD_CACHE_TTL = 60.0
+
+    def _get_team_client(self, team_id: str = "") -> Optional[Any]:
+        """Return the Slack WebClient for the given team, if available."""
+        if team_id and team_id in self._team_clients:
+            return self._team_clients[team_id]
+        if getattr(self, "_app", None) is not None:
+            return getattr(self._app, "client", None)
+        return None
+
+    def _describe_slack_api_error(self, response: Any, *, file_obj: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """Convert Slack API auth/permission failures into actionable user-facing text."""
+        if response is None or not hasattr(response, "get"):
+            return None
+
+        error = str(response.get("error", "") or "").strip()
+        if not error:
+            return None
+
+        file_label = str((file_obj or {}).get("name") or (file_obj or {}).get("id") or "this attachment")
+        needed = str(response.get("needed", "") or "").strip()
+        provided = str(response.get("provided", "") or "").strip()
+        reinstall_hint = " Update the Slack app scopes/settings and reinstall the app to the workspace."
+        provided_hint = f" Current bot scopes: {provided}." if provided else ""
+
+        if error == "missing_scope":
+            needed_hint = f"Missing scope: {needed}." if needed else "Missing required Slack scope."
+            return f"Slack attachment access failed for {file_label}. {needed_hint}{provided_hint}{reinstall_hint}"
+        if error in {"not_authed", "invalid_auth", "account_inactive", "token_revoked"}:
+            return f"Slack attachment access failed for {file_label} because the bot token is not authorized ({error}). Refresh the token/reinstall the app."
+        if error in {"file_not_found", "file_deleted"}:
+            return f"Slack attachment {file_label} is no longer available ({error})."
+        if error in {"access_denied", "file_access_denied", "no_permission", "not_allowed_token_type", "restricted_action"}:
+            return f"Slack attachment access failed for {file_label} because the bot does not have permission ({error}). Check workspace permissions/scopes and reinstall if needed."
+        return None
+
+    async def _probe_slack_file_access_issue(self, file_obj: Dict[str, Any], team_id: str = "") -> Optional[str]:
+        """Best-effort diagnosis for Slack attachment access/auth failures before download."""
+        file_id = str(file_obj.get("id", "") or "").strip()
+        if not file_id:
+            return None
+
+        client = self._get_team_client(team_id)
+        if client is None or not hasattr(client, "files_info"):
+            return None
+
+        try:
+            await client.files_info(file=file_id)
+            return None
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            detail = self._describe_slack_api_error(response, file_obj=file_obj)
+            if detail:
+                return detail
+            raise
+
+    def _describe_slack_download_failure(self, exc: Exception, *, file_obj: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """Translate Slack download exceptions into user-facing attachment diagnostics."""
+        file_label = str((file_obj or {}).get("name") or (file_obj or {}).get("id") or "this attachment")
+
+        response = getattr(exc, "response", None)
+        api_detail = self._describe_slack_api_error(response, file_obj=file_obj)
+        if api_detail:
+            return api_detail
+
+        try:
+            import httpx
+        except Exception:  # pragma: no cover
+            httpx = None
+
+        if httpx is not None and isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code
+            if status == 401:
+                return f"Slack attachment access failed for {file_label} with HTTP 401. The bot token is not authorized for this file."
+            if status == 403:
+                return f"Slack attachment access failed for {file_label} with HTTP 403. The bot likely lacks permission or scope to read this file."
+            if status == 404:
+                return f"Slack attachment {file_label} returned HTTP 404 and is no longer reachable."
+
+        message = str(exc)
+        if "Slack returned HTML instead of media" in message or "non-image data" in message:
+            return (
+                f"Slack attachment access failed for {file_label}: Slack returned an HTML/login or non-media response. "
+                "This usually means a scope, auth, or file-permission problem."
+            )
+        return None
 
     async def connect(self) -> bool:
         """Connect to Slack via Socket Mode."""
@@ -1092,10 +1177,16 @@ class SlackAdapter(BasePlatformAdapter):
         # Handle file attachments
         media_urls = []
         media_types = []
+        attachment_notices: List[str] = []
         files = event.get("files", [])
         for f in files:
             mimetype = f.get("mimetype", "unknown")
             url = f.get("url_private_download") or f.get("url_private", "")
+            access_issue = await self._probe_slack_file_access_issue(f, team_id=team_id)
+            if access_issue:
+                attachment_notices.append(access_issue)
+                logger.warning("[Slack] %s", access_issue)
+                continue
             if mimetype.startswith("image/") and url:
                 try:
                     ext = "." + mimetype.split("/")[-1].split(";")[0]
@@ -1107,7 +1198,12 @@ class SlackAdapter(BasePlatformAdapter):
                     media_types.append(mimetype)
                     msg_type = MessageType.PHOTO
                 except Exception as e:  # pragma: no cover - defensive logging
-                    logger.warning("[Slack] Failed to cache image from %s: %s", url, e, exc_info=True)
+                    detail = self._describe_slack_download_failure(e, file_obj=f)
+                    if detail:
+                        attachment_notices.append(detail)
+                        logger.warning("[Slack] %s", detail)
+                    else:
+                        logger.warning("[Slack] Failed to cache image from %s: %s", url, e, exc_info=True)
             elif mimetype.startswith("audio/") and url:
                 try:
                     ext = "." + mimetype.split("/")[-1].split(";")[0]
@@ -1118,7 +1214,12 @@ class SlackAdapter(BasePlatformAdapter):
                     media_types.append(mimetype)
                     msg_type = MessageType.VOICE
                 except Exception as e:  # pragma: no cover - defensive logging
-                    logger.warning("[Slack] Failed to cache audio from %s: %s", url, e, exc_info=True)
+                    detail = self._describe_slack_download_failure(e, file_obj=f)
+                    if detail:
+                        attachment_notices.append(detail)
+                        logger.warning("[Slack] %s", detail)
+                    else:
+                        logger.warning("[Slack] Failed to cache audio from %s: %s", url, e, exc_info=True)
             elif url:
                 # Try to handle as a document attachment
                 try:
@@ -1170,7 +1271,16 @@ class SlackAdapter(BasePlatformAdapter):
                             pass  # Binary content, skip injection
 
                 except Exception as e:  # pragma: no cover - defensive logging
-                    logger.warning("[Slack] Failed to cache document from %s: %s", url, e, exc_info=True)
+                    detail = self._describe_slack_download_failure(e, file_obj=f)
+                    if detail:
+                        attachment_notices.append(detail)
+                        logger.warning("[Slack] %s", detail)
+                    else:
+                        logger.warning("[Slack] Failed to cache document from %s: %s", url, e, exc_info=True)
+
+        if attachment_notices:
+            notice_block = "[Slack attachment notice]\n" + "\n".join(f"- {n}" for n in attachment_notices)
+            text = f"{notice_block}\n\n{text}" if text else notice_block
 
         # Resolve user display name (cached after first lookup)
         user_name = await self._resolve_user_name(user_id, chat_id=channel_id)

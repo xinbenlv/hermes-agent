@@ -473,6 +473,28 @@ class TestIncomingDocumentHandling:
         msg_event = adapter.handle_message.call_args[0][0]
         assert msg_event.message_type == MessageType.PHOTO
 
+    @pytest.mark.asyncio
+    async def test_missing_scope_is_surfaced_in_message_text(self, adapter):
+        """Attachment permission failures should be surfaced to the agent as a notice block."""
+        with patch.object(adapter, "_probe_slack_file_access_issue", new_callable=AsyncMock) as probe, \
+             patch.object(adapter, "_download_slack_file", new_callable=AsyncMock) as dl:
+            probe.return_value = "Slack attachment access failed for photo.jpg. Missing scope: files:read."
+            event = self._make_event(text="what's in this?", files=[{
+                "id": "F123",
+                "mimetype": "image/jpeg",
+                "name": "photo.jpg",
+                "url_private_download": "https://files.slack.com/photo.jpg",
+                "size": 1024,
+            }])
+            await adapter._handle_slack_message(event)
+
+        dl.assert_not_called()
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert msg_event.message_type == MessageType.TEXT
+        assert "[Slack attachment notice]" in msg_event.text
+        assert "files:read" in msg_event.text
+        assert "what's in this?" in msg_event.text
+
 
 # ---------------------------------------------------------------------------
 # TestMessageRouting

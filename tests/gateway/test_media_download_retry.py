@@ -540,13 +540,48 @@ from gateway.config import Platform, PlatformConfig  # noqa: E402
 
 
 def _make_slack_adapter():
-    config = PlatformConfig(enabled=True, token="xoxb-fake-token")
+    config = PlatformConfig(enabled=True, token="***")
     adapter = SlackAdapter(config)
     adapter._app = MagicMock()
     adapter._app.client = AsyncMock()
     adapter._bot_user_id = "U_BOT"
     adapter._running = True
     return adapter
+
+
+# ---------------------------------------------------------------------------
+# SlackAdapter diagnostics helpers
+# ---------------------------------------------------------------------------
+
+class TestSlackAttachmentDiagnostics:
+    def test_missing_scope_probe_returns_actionable_notice(self):
+        adapter = _make_slack_adapter()
+
+        class FakeSlackError(Exception):
+            def __init__(self, response):
+                super().__init__("missing scope")
+                self.response = response
+
+        adapter._app.client.files_info = AsyncMock(side_effect=FakeSlackError({
+            "error": "missing_scope",
+            "needed": "files:read",
+            "provided": "chat:write,files:write",
+        }))
+
+        async def run():
+            return await adapter._probe_slack_file_access_issue({"id": "F123", "name": "photo.jpg"})
+
+        detail = asyncio.run(run())
+        assert "files:read" in detail
+        assert "reinstall" in detail.lower()
+        assert "chat:write,files:write" in detail
+
+    def test_download_failure_403_returns_permission_notice(self):
+        adapter = _make_slack_adapter()
+        exc = _make_http_status_error(403)
+        detail = adapter._describe_slack_download_failure(exc, file_obj={"name": "report.pdf"})
+        assert "403" in detail
+        assert "permission or scope" in detail
 
 
 # ---------------------------------------------------------------------------
