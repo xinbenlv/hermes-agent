@@ -33,6 +33,20 @@ except ImportError:
 class TestToolResolution:
     """Verify get_tool_definitions returns all expected tools for eval."""
 
+    @pytest.fixture(autouse=True)
+    def _hermetic_terminal_env(self, monkeypatch):
+        # get_tool_definitions(enabled_toolsets=["terminal", ...]) walks the
+        # real backend-selection path in tools.terminal_tool. If an ambient
+        # TERMINAL_ENV=modal / TERMINAL_MODAL_MODE=direct is present (leaked
+        # from a prior test that set os.environ directly, a CI runner-level
+        # variable, or a stale user shell), backend init tries the Modal
+        # sandbox, fails for lack of credentials, and silently drops the
+        # "terminal" tool — which these tests then report as a regression.
+        # Clearing these here keeps the assertion about tool registration
+        # hermetic regardless of upstream env state.
+        for key in ("TERMINAL_ENV", "TERMINAL_MODAL_MODE", "TERMINAL_CWD"):
+            monkeypatch.delenv(key, raising=False)
+
     def test_terminal_and_file_toolsets_resolve_all_tools(self):
         """enabled_toolsets=['terminal', 'file'] should produce 6 tools."""
         from model_tools import get_tool_definitions
