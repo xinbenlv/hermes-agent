@@ -1,0 +1,32 @@
+patches:
+  - id: cpq-cornerstone-0
+    current_commit: f8fad87e
+    upstream_pr: null
+
+  - id: cpq-cornerstone-1
+    current_commit: a0523f16
+    upstream_pr: null
+
+  - id: patch-fix-test-pr14100
+    current_commit: 1d19b98d
+    upstream_pr: https://github.com/NousResearch/hermes-agent/pull/14100
+
+  - id: patch-fix-func-pr6457
+    current_commit: 21ce6e8d
+    upstream_pr: https://github.com/NousResearch/hermes-agent/pull/6457
+
+  - id: patch-feat-pr6459
+    current_commit: d3eb1678
+    upstream_pr: https://github.com/NousResearch/hermes-agent/pull/6459
+
+  - id: patch-feat-pr6750
+    current_commit: f379e540
+    upstream_pr: https://github.com/NousResearch/hermes-agent/pull/6750
+
+  - id: cpq-capstone-1
+    current_commit: 6539944f
+    upstream_pr: null
+
+  - id: cpq-capstone-0
+    current_commit: cpq-head
+    upstream_pr: null
