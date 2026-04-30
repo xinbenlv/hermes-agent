@@ -13,6 +13,23 @@ source .venv/bin/activate   # or: source venv/bin/activate
 `$HOME/.hermes/hermes-agent/venv` (for worktrees that share a venv with the
 main checkout).
 
+## Carried Patches (CPQ)
+
+This fork uses a Carried Patch Queue. **Operational guidance, conventions, scripts, and templates all live in the canonical repo-cpq skill:**
+
+  https://github.com/xinbenlv/opc/tree/main/skills/repo-cpq
+
+Read that skill before creating local carries, rebasing local `main`, or preparing upstream PRs that touch carried work. Do not guess CPQ commit naming, body shape, or workflow from memory.
+
+Local invariants:
+
+- `upstream` remote = pristine `NousResearch/hermes-agent`; `origin` = our fork (`xinbenlv/zn-hermes-agent`).
+- CPQ policy lives at `docs/carried-patches.md` (a thin pointer to the skill plus this fork's local invariants).
+- Live queue ledger lives at `docs/carried-patch-ledger.yaml`.
+- Verifier and ledger tooling at `scripts/cpq-checks.mjs`. Hooks under `git-hooks/` delegate to it.
+- `AGENTS.md` local workflow guidance belongs to `cpq-cornerstone-0` and must stay out of upstream PRs unless explicitly requested; code changes to Hermes source must be done in a git worktree first, never directly in `~/.hermes/hermes-agent/`, because the live checkout can break the running agent itself, but docs-only / Markdown-only changes may be made directly in `~/.hermes/hermes-agent/`.
+- Default stance: do as much as possible yourself. If the user must do something, give the shortest direct path — exact URL, exact clicks, a one-screen context briefing, and concrete risk.
+
 ## Project Structure
 
 File counts shift constantly — don't treat the tree below as exhaustive.
